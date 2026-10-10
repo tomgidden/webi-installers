@@ -56,34 +56,6 @@ __webi_main() {
     my_ext="$(echo "$my_ext" | sed 's/,$//')" # nix trailing comma
     set -e
 
-    ##
-    ## Detect http client
-    ##
-
-    set +e
-    WEBI_CURL="$(command -v curl)"
-    export WEBI_URL
-    set -e
-
-    # ex: Darwin or Linux
-    my_os="$(uname -s)"
-    # ex: 22.6.0
-    my_rev="$(uname -r)"
-    # ex: arm64
-    my_arch="$(uname -m)"
-
-    my_uname_o="$(uname -o 2> /dev/null || echo '')"
-    my_libc=''
-    if ldd /bin/ls 2> /dev/null | grep -q 'musl' 2> /dev/null; then
-        my_libc='musl'
-    elif echo "${my_uname_o}" | grep -q 'GNU' || uname -s | grep -q 'Linux'; then
-        my_libc='gnu'
-    else
-        my_libc='libc'
-    fi
-
-    export WEBI_UA="${my_os}/${my_rev} ${my_arch}/unknown ${my_libc}"
-
     webinstall() {
 
         b_package="${1:-}"
@@ -99,18 +71,8 @@ __webi_main() {
         mkdir -p "${b_install_tmpdir}"
 
         my_installer_url="${WEBI_HOST}/api/installers/${b_package}.sh?formats=${my_ext}"
-        if [ -n "${WEBI_CURL}" ]; then
-            if ! curl -fsSL "${my_installer_url}" -H "User-Agent: curl ${WEBI_UA}" \
-                -o "${b_install_tmpdir}/${b_package}-install.sh"; then
-                echo >&2 "error fetching '${my_installer_url}'"
-                exit 1
-            fi
-        else
-            if ! wget -q "${my_installer_url}" --user-agent="wget ${WEBI_UA}" \
-                -O "${b_install_tmpdir}/${b_package}-install.sh"; then
-                echo >&2 "error fetching '${my_installer_url}'"
-                exit 1
-            fi
+        if ! webi_curl "${my_installer_url}" "${b_install_tmpdir}/${b_package}-install.sh"; then
+            fatal ERROR "Error fetching '${my_installer_url}'"
         fi
         (
             cd "${b_install_tmpdir}"
@@ -157,7 +119,7 @@ __webi_main() {
             return 0
         fi
 
-        echo >&2 "    warn: no sha1 sum program"
+        log WARNING "no sha1 sum program"
         date '+%F %H:%M'
     }
 
@@ -268,6 +230,112 @@ webi_create_tmpdir() {
     fi
 }
 
+webi_load_sysinfo() {
+    # ex: Darwin or Linux
+    my_os="$(uname -s)"
+    # ex: 22.6.0
+    my_rev="$(uname -r)"
+    # ex: arm64
+    my_arch="$(uname -m)"
+
+    if [ -z "${WEBI_UA:-}" ]; then
+        my_uname_o="$(uname -o 2> /dev/null || echo '')"
+        my_libc=''
+        if ldd /bin/ls 2> /dev/null | grep -q 'musl' 2> /dev/null; then
+            my_libc='musl'
+        elif echo "${my_uname_o}" | grep -q 'GNU' || uname -s | grep -q 'Linux'; then
+            my_libc='gnu'
+        else
+            my_libc='libc'
+        fi
+
+        export WEBI_UA="${my_os}/${my_rev} ${my_arch}/unknown ${my_libc}"
+    fi
+}
+
+fatal () {
+	log "$@"
+	exit 1
+}
+
+log () {
+    local level="${1}" message="${2}"
+		local eol="\012"
+    [ -z "${message}" ] && fatal CRITICAL "no message"
+
+    local color= 
+    case "${level}" in
+        CRITICAL) color='35' ;;
+        ERROR)    color='31' ;;
+        WARNING)  color='33' ;;
+        NOTICE)   color='39' ;;
+        INFO)     color='36' ;;
+        DEBUG)    color='2'  ;;
+        '') [ -z "${SILENT:-}" ] && printf "${message}${eol}"
+            return 0
+            ;;
+        *)  fatal CRITICAL "bad log level: ${level}"
+            return 1 
+            ;;
+    esac
+
+    local prefix="${level:+[$level]}"
+    case "${level}" in
+        CRITICAL) ;;
+        INFO)         [ -z "${VERBOSE:-}${DEBUG:-}" ] && return 0 ;;
+        DEBUG)        [ -z "${DEBUG:-}" ] && return 0 ;;
+        *)            [ -n "${SILENT:-}" ] && return 0 ;;
+    esac
+
+    prefix="${prefix:+$prefix}"
+
+    if  [ -z "${color:-}" ] ||
+        [ -n "${NO_COLOR:-}${NOCOLOR:-}${NO_COLOUR:-}${NOCOLOUR:-}" ] ||
+        [ "${TERM:-dumb}" = "dumb" ] || 
+        [ ! -t 2 ]; then
+        printf "%10s%s${eol}" "${prefix}" " ${message}" >&2
+    elif [ -z "${COLORPREFIX:-${COLOURPREFIX:-}}" ]; then
+        printf "\033[1;${color}m%10s\033[22;24m%s\033[0m${eol}" "${prefix}" " ${message}" >&2
+    else
+        printf "\033[${color}m%10s\033[0m%s${eol}" "${prefix}" " ${message}" >&2
+    fi
+}
+
+# Download $1 to file $2 ('-' for stdout) with curl or wget, returning its rc.
+# Uses WEBI_CURL (preferred) or WEBI_WGET if set; otherwise detects curl, then
+# wget. Not a subshell, so detection persists (unless called within $(...)).
+webi_curl() {
+    a_url="${1:-}"
+    [ -z "${a_url}" ] && fatal ERROR "no URL specified"
+
+    a_file="${2:-}"
+    [ -z "${a_file}" ] && fatal ERROR "no file specified; use '-' for stdout"
+
+    # get WEBI_UA
+    webi_load_sysinfo
+
+    # Detect curl, or failing that, wget
+    if [ -z "${WEBI_CURL:-}" ] && [ -z "${WEBI_WGET:-}" ]; then
+        if b_cmd="$(command -v curl)" && "$b_cmd" --version > /dev/null 2>&1; then
+            WEBI_CURL="$b_cmd"
+        elif b_cmd="$(command -v wget)"; then
+            # no --version check: busybox wget doesn't support it
+            WEBI_WGET="$b_cmd"
+        fi
+    fi
+
+    if [ -n "${WEBI_CURL:-}" ]; then
+        "${WEBI_CURL}" -w "%{http_code}" -fsSL "$a_url" -H "User-Agent: curl ${WEBI_UA}" -o "$a_file"
+        return $?
+    elif [ -n "${WEBI_WGET:-}" ]; then
+        "${WEBI_WGET}" -q "$a_url" --user-agent="wget ${WEBI_UA}" -O "$a_file"
+        return $?
+    fi
+
+    fatal ERROR "neither 'curl' nor 'wget' found or working"
+    return 127
+}
+
 webi_shell_init() { (
     a_shell="${2:-}"
 
@@ -296,8 +364,7 @@ webi_shell_init() { (
             fn_shell_init_fish
             ;;
         *)
-            echo >&2 "Unsupported shell: $2"
-            exit 1
+            fatal ERROR "Unsupported shell: $2"
             ;;
     esac
 ) }
@@ -319,7 +386,6 @@ fn_shell_integrate_bash() { (
         return 0
     fi
 
-    echo >&2 "    Edit ~/.bashrc to add 'eval \"\$(webi --init bash)\"'"
     # shellcheck disable=SC2016
     {
         echo ''
@@ -361,7 +427,6 @@ fn_shell_integrate_zsh() { (
         return 0
     fi
 
-    echo >&2 "    Edit ~/.zshrc to add 'eval \"\$(webi --init zsh)\"'"
     # shellcheck disable=SC2016
     {
         echo ''
@@ -397,7 +462,6 @@ fn_shell_integrate_fish() { (
         return 0
     fi
 
-    echo >&2 "    Edit ~/.config/fish/config.fish to add 'webi --init fish | source'"
     # shellcheck disable=SC2016
     {
         echo ''
@@ -477,7 +541,7 @@ fn_list_uncached() { (
         echo "--list"
         echo "--info" # <package>
     } > "${my_tmp}"
-    curl -fsS "${WEBI_HOST}/sitemap.xml" |
+    webi_curl "${WEBI_HOST}/sitemap.xml" - |
         grep -F "${WEBI_HOST}" |
         cut -d'<' -f2 |
         cut -c "${my_count}"- >> "${my_tmp}"
@@ -489,11 +553,12 @@ fn_list_uncached() { (
 
 webi_info() { (
     if [ $# -lt 2 ]; then
-        echo >&2 "Usage: webi --info <package>"
-        exit 1
+        fatal ERROR "Usage: webi --info <package>"
     fi
 
-    echo >&2 "[warn] the output of --info is completely half-baked and will change"
+    webi_load_sysinfo
+
+    log WARNING "the output of --info is completely half-baked and will change"
     my_pkg="${2}"
     # TODO need a way to check that it exists at all (readme, win, lin)
     echo ""
@@ -510,22 +575,23 @@ webi_info() { (
 
     # TODO os=linux,macos,windows (limit to tagged releases)
     my_releases="$(
-        curl -fsS "${WEBI_HOST}/api/releases/${my_pkg}.json?channel=stable&limit=1&pretty=true"
+        webi_curl "${WEBI_HOST}/api/releases/${my_pkg}.json?channel=stable&limit=1&pretty=true" -
     )"
 
     if printf '%s\n' "${my_releases}" | grep -q "error"; then
         my_releases_beta="$(
-            curl -fsS "${WEBI_HOST}/api/releases/${my_pkg}.json?&limit=1&pretty=true"
+            webi_curl "${WEBI_HOST}/api/releases/${my_pkg}.json?&limit=1&pretty=true" -
         )"
         if printf '%s\n' "${my_releases_beta}" | grep -q "error"; then
-            echo >&2 "'${my_pkg}' is a special case that does not have releases"
+            # XXX: This occurs even if a non-existent package is requested
+            log WARNING "'${my_pkg}' is a special case that does not have releases"
         else
-            echo >&2 "ERROR no stable releases for '${my_pkg}'!"
+            log WARNING "no stable releases for '${my_pkg}'!"
         fi
         exit 0
     fi
 
-    echo >&2 "Stable '${my_pkg}' releases:"
+    echo "Stable '${my_pkg}' releases:"
     if command -v jq > /dev/null; then
         printf '%s\n' "${my_releases}" |
             jq
