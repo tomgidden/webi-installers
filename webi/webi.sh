@@ -7,6 +7,9 @@ set -u
 WEBI_HOST="${WEBI_HOST:-https://webinstall.dev}"
 WEBI_TIMESTAMP="${WEBI_TIMESTAMP:-$(date +%F_%H-%M-%S)}"
 
+: "${WEBI_STALE_TIME:=600}"  # seconds after which cache should be refreshed in background
+: "${WEBI_EXPIRY_TIME:=900}" # seconds after which cache must be refreshed before use
+
 __webi_main() {
 
     if [ -n "${_WEBI_PARENT:-}" ]; then
@@ -20,6 +23,9 @@ __webi_main() {
 
     export WEBI_HOST
     export WEBI_TIMESTAMP
+
+    my_tmpdir="${TMPDIR:-/tmp}"
+    my_tmpdir="${my_tmpdir%/}"
 
     ##
     ## Detect acceptable package formats
@@ -218,8 +224,6 @@ webi_create_tmpdir() {
     [ -d "${_webi_tmp:-}" ] && [ -w "${_webi_tmp}" ] && return 0
 
     # Create a job-specific temp directory
-    my_tmpdir="${TMPDIR:-/tmp}"
-    my_tmpdir="${my_tmpdir%/}"
     _webi_tmp="$(mktemp -d "${my_tmpdir}/webi-${WEBI_TIMESTAMP}.XXXXXXXX")" || return 1
     export _webi_tmp
 
@@ -254,50 +258,63 @@ webi_load_sysinfo() {
 }
 
 fatal () {
-	log "$@"
-	exit 1
+    log "$@"
+    exit 1
+}
+
+color () {
+    # Usage:
+    #   colorcode '1;31' 'this is bold red'
+    #   colorcode '35'   'this is magenta on stderr' 2
+    color_color="${1}"
+    color_text="${2}"
+    color_fd=${3:-1}
+
+    if  [ -z "${color_color:-}" ] ||
+        [ -n "${NO_COLOR:-}${NOCOLOR:-}${NO_COLOUR:-}${NOCOLOUR:-}" ] ||
+        [ "${TERM:-dumb}" = "dumb" ] ||
+        [ ! -t "${color_fd}" ]; then
+        printf "%s" "${color_text}" >&"${color_fd}"
+    else
+        printf "\033[%sm%s\033[0m" "${color_color}" "${color_text}" >&"${color_fd}"
+    fi
 }
 
 log () {
-    local level="${1}" message="${2}"
-		local eol="\012"
-    [ -z "${message}" ] && fatal CRITICAL "no message"
+    my_level="${1}" my_message="${2}"
+    my_eol="\012"
+    [ -z "${my_message}" ] && fatal CRITICAL "no message"
 
-    local color= 
-    case "${level}" in
-        CRITICAL) color='35' ;;
-        ERROR)    color='31' ;;
-        WARNING)  color='33' ;;
-        NOTICE)   color='39' ;;
-        INFO)     color='36' ;;
-        DEBUG)    color='2'  ;;
-        '') [ -z "${SILENT:-}" ] && printf "${message}${eol}"
+    my_color=
+    case "${my_level}" in
+        CRITICAL) my_color='35' ;;
+        ERROR)    my_color='31' ;;
+        WARNING)  my_color='33' ;;
+        NOTICE)   my_color='39' ;;
+        INFO)     my_color='36' ;;
+        DEBUG)    my_color='2'  ;;
+        '') [ -z "${SILENT:-}" ] && printf "%s%s" "${my_message}" "${my_eol}"
             return 0
             ;;
-        *)  fatal CRITICAL "bad log level: ${level}"
-            return 1 
+        *)  fatal CRITICAL "bad log level: ${my_level}"
             ;;
     esac
 
-    local prefix="${level:+[$level]}"
-    case "${level}" in
+    my_prefix="${my_level:+[$my_level]}"
+    case "${my_level}" in
         CRITICAL) ;;
         INFO)         [ -z "${VERBOSE:-}${DEBUG:-}" ] && return 0 ;;
         DEBUG)        [ -z "${DEBUG:-}" ] && return 0 ;;
         *)            [ -n "${SILENT:-}" ] && return 0 ;;
     esac
 
-    prefix="${prefix:+$prefix}"
-
-    if  [ -z "${color:-}" ] ||
-        [ -n "${NO_COLOR:-}${NOCOLOR:-}${NO_COLOUR:-}${NOCOLOUR:-}" ] ||
-        [ "${TERM:-dumb}" = "dumb" ] || 
-        [ ! -t 2 ]; then
-        printf "%10s%s${eol}" "${prefix}" " ${message}" >&2
-    elif [ -z "${COLORPREFIX:-${COLOURPREFIX:-}}" ]; then
-        printf "\033[1;${color}m%10s\033[22;24m%s\033[0m${eol}" "${prefix}" " ${message}" >&2
+    my_prefix="$(printf "%10s" "${my_prefix:+$my_prefix}")"
+    if [ -z "${COLORPREFIX:-${COLOURPREFIX:-}}" ]; then
+        color "1;${my_color}" "${my_prefix}" 2
+        color "${my_color}"   " ${my_message}" 2
     else
-        printf "\033[${color}m%10s\033[0m%s${eol}" "${prefix}" " ${message}" >&2
+        color "${my_color}" "${my_prefix}" 2
+        color "" " ${my_message}${my_eol}" 2
     fi
 }
 
@@ -305,11 +322,11 @@ log () {
 # Uses WEBI_CURL (preferred) or WEBI_WGET if set; otherwise detects curl, then
 # wget. Not a subshell, so detection persists (unless called within $(...)).
 webi_curl() {
-    a_url="${1:-}"
-    [ -z "${a_url}" ] && fatal ERROR "no URL specified"
+    curl_url="${1:-}"
+    [ -z "${curl_url}" ] && fatal ERROR "no URL specified"
 
-    a_file="${2:-}"
-    [ -z "${a_file}" ] && fatal ERROR "no file specified; use '-' for stdout"
+    curl_file="${2:-}"
+    [ -z "${curl_file}" ] && fatal ERROR "no file specified; use '-' for stdout"
 
     # get WEBI_UA
     webi_load_sysinfo
@@ -325,15 +342,14 @@ webi_curl() {
     fi
 
     if [ -n "${WEBI_CURL:-}" ]; then
-        "${WEBI_CURL}" -w "%{http_code}" -fsSL "$a_url" -H "User-Agent: curl ${WEBI_UA}" -o "$a_file"
+        "${WEBI_CURL}" -fsSL "$curl_url" -H "User-Agent: curl ${WEBI_UA}" -o "$curl_file"
         return $?
     elif [ -n "${WEBI_WGET:-}" ]; then
-        "${WEBI_WGET}" -q "$a_url" --user-agent="wget ${WEBI_UA}" -O "$a_file"
+        "${WEBI_WGET}" -q "$curl_url" --user-agent="wget ${WEBI_UA}" -O "$curl_file"
         return $?
     fi
 
     fatal ERROR "neither 'curl' nor 'wget' found or working"
-    return 127
 }
 
 webi_shell_init() { (
@@ -485,70 +501,111 @@ fn_shell_init_fish() { (
 ); }
 
 webi_list() { (
-    # make sure there's always a cache dir and timestamp file
-    mkdir -p ~/.local/share/webi/var/
+    # To avoid ownership collision with other users when using sudo,
+    # save the list per-user
+    my_uid="$(id -u)"
+    my_tmpbase="webi.uid-${my_uid}.list"
 
-    if ! test -r ~/.local/share/webi/var/list.txt; then
-        echo '0' > ~/.local/share/webi/var/last_update
-    elif ! test -r ~/.local/share/webi/var/last_update; then
-        echo '0' > ~/.local/share/webi/var/last_update
-    fi
+    # Get all cached list files with my uid that I own, most recent first (-t)
+    my_lists="$(
+        find "${my_tmpdir}/." \
+            ! -name . -prune \
+            -type f \
+            -user "${my_uid}" \
+            -name "${my_tmpbase}.*" \
+            -exec ls -t {} + 2> /dev/null
+    )"
 
-    # compare the timestamp in the timestamp file to now
-    # (in seconds since unix epoch)
-    my_stale_age=600
-    my_expire_age=900
-    my_now="$(date -u '+%s')"
-    my_then="$(cat ~/.local/share/webi/var/last_update)"
-    my_diff=$((my_now - my_then))
+    my_list=
+    my_list_age=0
+    # If we have any existing lists...
+    if [ -n "${my_lists}" ]; then
+        # Take the most recent (first) valid file and delete any others
+        while IFS= read -r my_file; do
+            if [ -z "${my_list}" ] && [ -s "${my_file}" ]; then
+                my_list="${my_file}"
+            else
+                rm -f "${my_file}" || true
+            fi
+        done << EOF
+${my_lists}
+EOF
 
-    # show when the cache will update
-    my_stales_in=$((my_stale_age - my_diff))
-    my_expires_in=$((my_expire_age - my_diff))
-
-    # update if it's been longer than the staletime
-    if test "${my_stales_in}" -lt "0"; then
-        if test "${my_expires_in}" -lt "0"; then
-            fn_list_uncached
-        else
-            fn_list_uncached &
+        # Get age of file if it exists and is not empty
+        my_list_age="$((WEBI_EXPIRY_TIME + 1))"
+        if [ -n "${my_list}" ]; then
+            my_now="$(date -u '+%s')"
+            my_list_date="$(date -u -r "${my_list}" '+%s' 2> /dev/null || echo '0')"
+            if [ "${my_list_date}" -gt 0 ]; then
+                my_list_age="$((my_now - my_list_date))"
+            else
+                # 'date -r FILE' probably fails on OpenBSD, NetBSD, Solaris, AIX, etc.
+                # but should work on GNU, macOS, FreeBSD.
+                log_error "[warn] can't get mtime of '${my_list}'"
+                my_list_date=0
+            fi
         fi
     fi
 
-    # give back the list
-    cat ~/.local/share/webi/var/list.txt
+    if [ -z "${my_list}" ] || [ "${my_list_age}" -gt "${WEBI_EXPIRY_TIME}" ]; then
+        # Download fresh list; can lose a race condition here, but no matter
+        # as the file will be the same for all competitors
+        my_new_list="$(fn_list_uncached "${my_tmpdir}" "${my_tmpbase}")" &&
+            my_list="${my_new_list}"
+
+    elif [ "${my_list_age}" -gt "${WEBI_STALE_TIME}" ]; then
+        # freshen the file to avoid race conditions
+        touch "${my_list}" 2> /dev/null || true
+        # refresh in background
+        fn_list_uncached "${my_tmpdir}" "${my_tmpbase}" > /dev/null &
+    fi
+
+    # Output the list
+    if [ -s "${my_list}" ]; then
+        cat "${my_list}"
+        return 0
+    fi
+); }
+
+fn_list_options() { (
+    echo "help"
+    echo "--help"
+    echo "version"
+    echo "-V"
+    echo "--version"
+    echo "--init" # <shell>
+    echo "--list"
+    echo "--info" # <package>
 ); }
 
 fn_list_uncached() { (
+    my_tmpdir="$1"
+    my_tmpbase="$2"
 
-    my_len="${#WEBI_HOST}"
-    # 6 because the field will looks like "loc>WEBI_HOST/PKG_NAME"
-    # and the count is 1-indexed
-    my_count="$((my_len + 6))"
+    # Download sitemap, and fail this function on error.
+    my_sitemap="$(webi_curl "${WEBI_HOST%/}/sitemap.xml" -)" || return 1
 
-    my_now="$(date -u '+%s')"
-    echo "${my_now}" > ~/.local/share/webi/var/last_update
-
+    # Construct intermediate file in per-job temp directory to avoid race
+    # conditions with other processes.
     webi_create_tmpdir
-    my_tmp="$(mktemp "${_webi_tmp}/list.txt.XXXXXXXX")"
-    {
-        echo "help"
-        echo "--help"
-        echo "version"
-        echo "-V"
-        echo "--version"
-        echo "--init" # <shell>
-        echo "--list"
-        echo "--info" # <package>
-    } > "${my_tmp}"
-    webi_curl "${WEBI_HOST}/sitemap.xml" - |
-        grep -F "${WEBI_HOST}" |
-        cut -d'<' -f2 |
-        cut -c "${my_count}"- >> "${my_tmp}"
-    mv "${my_tmp}" ~/.local/share/webi/var/list.txt
+    my_intermediate="$(mktemp "${_webi_tmp}/download-${my_tmpbase}.XXXXXXXX")" || return 1
+    fn_list_options > "${my_intermediate}"
 
-    my_now="$(date -u '+%s')"
-    echo "${my_now}" > ~/.local/share/webi/var/last_update
+    # Strip just the path from <loc>$my_host/path</loc>
+    printf '%s\n' "${my_sitemap}" |
+        awk -F'[<>]' \
+            -v h="${WEBI_HOST%/}/" \
+            'BEGIN {l=length(h)+1} index($3,h)==1 {print substr($3,l)}' \
+            >> "${my_intermediate}"
+
+    # Save to the cache file that will persist after this job (and cleaned up
+    # by either the OS or a later run of webi, if expired)
+    my_list_file="$(mktemp "${my_tmpdir}/${my_tmpbase}.XXXXXXXX")" || return 1
+    cat "${my_intermediate}" > "${my_list_file}"
+    rm -f "${my_intermediate}"
+
+    # Return the file path
+    echo "${my_list_file}"
 ); }
 
 webi_info() { (
