@@ -24,6 +24,7 @@ __webi_main() {
     export WEBI_HOST
 
     WEBI_TMPDIR="${WEBI_TMPDIR%/}"
+    export WEBI_TMPDIR
 
     export WEBI_TIMESTAMP
 
@@ -71,13 +72,13 @@ __webi_main() {
             exit 1
         fi
 
-        webi_create_tmpdir
+        fn_create_tmpdir
 
         b_install_tmpdir="${_webi_tmp}/${b_package}-install"
         mkdir -p "${b_install_tmpdir}"
 
         my_installer_url="${WEBI_HOST}/api/installers/${b_package}.sh?formats=${my_ext}"
-        if ! webi_download "${my_installer_url}" "${b_install_tmpdir}/${b_package}-install.sh"; then
+        if ! fn_download "${my_installer_url}" "${b_install_tmpdir}/${b_package}-install.sh"; then
             fatal ERROR "Error fetching '${my_installer_url}'"
         fi
         (
@@ -89,7 +90,7 @@ __webi_main() {
     show_path_updates() {
 
         if test -z "${_WEBI_CHILD}"; then
-            webi_create_tmpdir
+            fn_create_tmpdir
             if test -f "${_webi_tmp}/.PATH.env"; then
                 my_paths=$(sort -u < "${_webi_tmp}/.PATH.env")
                 if test -n "${my_paths}"; then
@@ -223,13 +224,13 @@ print_color() {
     #   print_color '1;31'              'this is bold red'
     #   print_color '5;38;2;255;192;64' 'blinking orange'
     #   print_color '35'                'this is magenta on stdout'   1
-    _pc_color="${1}" _pc_text="${2}" _pc_fd=${3:-2}
-    if  [ -z "${_pc_color:-}" ]            || # no color requested, or
+    b_pccolor="${1}" b_pctext="${2}" b_pcfd=${3:-2}
+    if  [ -z "${b_pccolor:-}" ]            || # no color requested, or
         [ -n "${NO_COLOR:-}${NOCOLOR:-}" ] || # color explicitly disabled, or
         [ "${TERM:-dumb}" = "dumb" ]       || # dumb terminal, or
-        [ ! -t "${_pc_fd}" ]                  # not a tty => no color
-    then printf "%s" "${_pc_text}"                               >&"${_pc_fd}"
-    else printf "\033[%sm%s\033[0m" "${_pc_color}" "${_pc_text}" >&"${_pc_fd}"
+        [ ! -t "${b_pcfd}" ]                  # not a tty => no color
+    then printf "%s" "${b_pctext}"                               >&"${b_pcfd}"
+    else printf "\033[%sm%s\033[0m" "${b_pccolor}" "${b_pctext}" >&"${b_pcfd}"
     fi
 }
 
@@ -238,30 +239,30 @@ log() {
     #   log ERROR 'Something broke!'
     #   log INFO 'The 1 means "stdout" rather than "stderr":' 1
     #   log EXEC "Command that's running or would be (DRYRUN=1)"
-    _loglevel="${1}" _logmsg="${2}" _logfd=${3:-}
-    case "${_loglevel}" in
-        CRITICAL)   _logcolor='35' _logprefix='[CRITICAL] '     ;;
-        NOTICE)     _logcolor='39' _logprefix='[NOTICE]   '     ;;
-        ERROR)      _logcolor='31' _logprefix='[ERROR]    '     ;;
-        WARNING)    _logcolor='33' _logprefix='[WARNING]  '     ;;
-        INFO)       _logcolor='36' _logprefix='[INFO]     '     ;;
-        DEBUG)      _logcolor='2'  _logprefix='[DEBUG]    '     ;;
+    b_loglevel="${1}" b_logmsg="${2}" b_logfd=${3:-}
+    case "${b_loglevel}" in
+        CRITICAL)   b_logcolor='35' b_logprefix='[CRITICAL] '     ;;
+        NOTICE)     b_logcolor='39' b_logprefix='[NOTICE]   '     ;;
+        ERROR)      b_logcolor='31' b_logprefix='[ERROR]    '     ;;
+        WARNING)    b_logcolor='33' b_logprefix='[WARNING]  '     ;;
+        INFO)       b_logcolor='36' b_logprefix='[INFO]     '     ;;
+        DEBUG)      b_logcolor='2'  b_logprefix='[DEBUG]    '     ;;
         EXEC)       if [ -n "${DRYRUN:-}" ];
-                    then _logcolor='32' _logprefix='[EXEC]     '
-                    else _logcolor='34' _logprefix='[DRYRUN]   '
+                    then b_logcolor='34' b_logprefix='[DRYRUN]   '
+                    else b_logcolor='32' b_logprefix='[EXEC]     '
                     fi ;;
-        '')         _logcolor='' _logprefix='' ;;
-        *)          fatal ERROR "bad log level: ${_loglevel}"
+        '')         b_logcolor='' b_logprefix='' ;;
+        *)          fatal ERROR "bad log level: ${b_loglevel}"
     esac
-    case "${_loglevel}" in
+    case "${b_loglevel}" in
         DEBUG)      [ -z "${DEBUG:-}" ]             && return 0 ;;
         INFO|EXEC)  [ -z "${VERBOSE:-}${DEBUG:-}" ] && return 0 ;;
         CRITICAL)   ;; # CRITICAL is always shown, regardless of $SILENT
         *)          [ -n "${SILENT:-}" ]            && return 0 ;;
     esac
-    print_color "1;${_logcolor}" "${_logprefix}" "${_logfd:-2}"
-    print_color "${_logcolor}"   "${_logmsg}"    "${_logfd:-2}"
-    printf '\n' >&"${_logfd:-2}"
+    print_color "1;${b_logcolor}" "${b_logprefix}" "${b_logfd:-2}"
+    print_color "${b_logcolor}"   "${b_logmsg}"    "${b_logfd:-2}"
+    printf '\n' >&"${b_logfd:-2}"
 }
 
 fatal() {
@@ -269,7 +270,7 @@ fatal() {
     exit 1
 }
 
-webi_create_tmpdir() {
+fn_create_tmpdir() {
     # If the directory already exists and is writable, use it
     [ -d "${_webi_tmp:-}" ] && [ -w "${_webi_tmp}" ] && return 0
 
@@ -286,7 +287,7 @@ webi_create_tmpdir() {
     trap 'exit 1' HUP INT TERM
 }
 
-webi_load_sysinfo() {
+fn_load_sysinfo() {
     # ex: Darwin or Linux
     my_os="$(uname -s)"
     # ex: 22.6.0
@@ -312,15 +313,15 @@ webi_load_sysinfo() {
 # Download $1 to file $2 ('-' for stdout) with curl or wget, returning its rc.
 # Uses WEBI_CURL (preferred) or WEBI_WGET if set; otherwise detects curl, then
 # wget. Not a subshell, so detection persists (unless called within $(...)).
-webi_download() {
-    _dl_url="${1:-}"
-    [ -z "${_dl_url}" ] && fatal ERROR "no URL specified"
+fn_download() {
+    b_dlurl="${1:-}"
+    [ -z "${b_dlurl}" ] && fatal ERROR "no URL specified"
 
-    _dl_file="${2:-}"
-    [ -z "${_dl_file}" ] && fatal ERROR "no file specified; use '-' for stdout"
+    b_dlfile="${2:-}"
+    [ -z "${b_dlfile}" ] && fatal ERROR "no file specified; use '-' for stdout"
 
     # get WEBI_UA
-    webi_load_sysinfo
+    fn_load_sysinfo
 
     # Detect curl, or failing that, wget
     if [ -z "${WEBI_CURL:-}" ] && [ -z "${WEBI_WGET:-}" ]; then
@@ -333,10 +334,10 @@ webi_download() {
     fi
 
     if [ -n "${WEBI_CURL:-}" ]; then
-        "${WEBI_CURL}" -fsSL "$_dl_url" -H "User-Agent: curl ${WEBI_UA}" -o "$_dl_file"
+        "${WEBI_CURL}" -fsSL "$b_dlurl" -H "User-Agent: curl ${WEBI_UA}" -o "$b_dlfile"
         return $?
     elif [ -n "${WEBI_WGET:-}" ]; then
-        "${WEBI_WGET}" -q "$_dl_url" --user-agent="wget ${WEBI_UA}" -O "$_dl_file"
+        "${WEBI_WGET}" -q "$b_dlurl" --user-agent="wget ${WEBI_UA}" -O "$b_dlfile"
         return $?
     fi
 
@@ -374,7 +375,7 @@ webi_shell_init() { (
             fatal ERROR "Unsupported shell: ${2}"
             ;;
     esac
-); }
+) }
 
 fn_shell_integrate_bash() { (
     a_force="${1}"
@@ -536,7 +537,7 @@ EOF
                 # 'date -r FILE' probably fails on OpenBSD, NetBSD, Solaris, AIX, etc.
                 # but should work on GNU, macOS, FreeBSD.
                 log WARNING "can't get mtime of '${my_list}'"
-                my_list_date=0
+                my_list_age=0
             fi
         fi
     fi
@@ -576,12 +577,12 @@ fn_list_uncached() { (
     my_tmpbase="$1"
 
     # Download sitemap, and fail this function on error.
-    my_sitemap="$(webi_download "${WEBI_HOST}/sitemap.xml" -)" || return 1
+    my_sitemap="$(fn_download "${WEBI_HOST}/sitemap.xml" -)" || return 1
 
     # Construct intermediate file in per-job temp directory to avoid race
     # conditions with other processes. The list will be saved to a more
     # persistent location within $[WEBI_]TMPDIR later
-    webi_create_tmpdir
+    fn_create_tmpdir
 
     my_intermediate="$(mktemp "${_webi_tmp}/download-${my_tmpbase}.XXXXXXXX")" || return 1
     fn_list_options > "${my_intermediate}"
@@ -611,7 +612,7 @@ webi_info() { (
     log WARNING "the output of --info is completely half-baked and will change"
     my_pkg="${2}"
 
-    webi_load_sysinfo     # load $my_os, $my_arch
+    fn_load_sysinfo     # load $my_os, $my_arch
 
     # TODO need a way to check that it exists at all (readme, win, lin)
     echo ""
@@ -628,12 +629,12 @@ webi_info() { (
 
     # TODO os=linux,macos,windows (limit to tagged releases)
     my_releases="$(
-        webi_download "${WEBI_HOST}/api/releases/${my_pkg}.json?channel=stable&limit=1&pretty=true" -
+        fn_download "${WEBI_HOST}/api/releases/${my_pkg}.json?channel=stable&limit=1&pretty=true" -
     )"
 
     if printf '%s\n' "${my_releases}" | grep -q "error"; then
         my_releases_beta="$(
-            webi_download "${WEBI_HOST}/api/releases/${my_pkg}.json?&limit=1&pretty=true" -
+            fn_download "${WEBI_HOST}/api/releases/${my_pkg}.json?&limit=1&pretty=true" -
         )"
         if printf '%s\n' "${my_releases_beta}" | grep -q "error"; then
             # TODO This occurs even if a non-existent package is requested
